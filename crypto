@@ -1,0 +1,321 @@
+def goppaPolynomial(F, t):
+    """Generate a set of 5 irreducible Goppa polynomials"""
+    P = PolynomialRing(F, 'x')
+    x = P.gen()
+    S = set()
+    k = 0
+    while len(S) < 5 and k < 10:
+        S.add(P.irreducible_element(t))
+        k += 1
+    return S
+
+def parityMatrixGCExt(F, n, g):
+    """Generate parity-check matrix H over extended field"""
+    P = PolynomialRing(F, 'x')
+    x = P.gen()
+    t = g.degree()
+
+    # Generate code locators
+    code_locators = Permutations(F.list()[1:n-1] + [F(1), F(0)], n).random_element()
+
+    # Generate polynomial h with roots in code locators
+    h = F(1)
+    for i in code_locators:
+        h *= (x - i)
+
+    # Generate column vectors
+    v = []
+    for i in code_locators:
+        v.append((h * inverse_mod((x - i), g)).mod(g))
+
+    # Generate H
+    H = matrix(F, t, n)
+    for j in range(n):
+        element = list(v[j])
+        for i in range(t):
+            H[i, j] = element[i] if i < len(element) else 0
+    return H, code_locators
+
+def polyToVector(F, p):
+    """Converts polynomial over F to a vector over base of F"""
+    P = PolynomialRing(F.base(), 'z')
+    f = P(p)
+    coeff = f.list()
+    m = F.degree()
+    v = [coeff[i] if i < len(coeff) else 0 for i in range(m)]
+    return vector(F.base(), v)
+
+def parityMatrixGCBase(F, H):
+    """Expand parity matrix H over extended field to a matrix over base field"""
+    m = F.degree()
+    n = H.ncols()
+    k = H.nrows()
+    Hbase = matrix(F.base(), m * k, n)
+    for j in range(n):
+        r = 0
+        for i in range(k):
+            Hbase[r:r+m, j] = polyToVector(F, H[i, j])
+            r += m
+    return Hbase
+
+def generatorMatrixGCBase(m, t, n, H):
+    """Generate generator matrix G over GF(2)"""
+    H_kernel_basis = H.right_kernel().basis()
+    G = matrix(GF(2), H_kernel_basis[:m * t])
+    return G
+
+def hammingDistance(v1, v2):
+    """Computes Hamming distance between two vectors v1 and v2"""
+    v1 = list(v1)
+    v2 = list(v2)
+    while len(v1) < len(v2):
+        v1.append(0)
+    while len(v2) < len(v1):
+        v2.append(0)
+    return sum([v1[i] != v2[i] for i in range(len(v1))])
+
+def syndrome(m, w, g, support):
+    F = GF(2^m, name='z')
+    P = PolynomialRing(F, 'x')
+    x = P.gen()
+    s = [w[i] * inverse_mod((x - support[i]), g) for i in range(len(w))]
+    return sum(s)
+
+def sqrtX(m, g):
+    F = GF(2^m, name='z')
+    P = PolynomialRing(F, 'x')
+    x = P.gen()
+    g0_list = g.list()[::2]
+    g1_list = g.list()[1::2]
+    g0 = sum([sqrt(g0_list[i]) * x^i for i in range(len(g0_list))])
+    g1 = sum([sqrt(g1_list[i]) * x^i for i in range(len(g1_list))])
+    g1_inv = xgcd(g1, g)[1]
+    root_x = (g0 * g1_inv).mod(g)
+    return root_x
+
+def sqrtP(m, S, g, root_x):
+    F = GF(2^m, name='z')
+    P = PolynomialRing(F, 'x')
+    x = P.gen()
+    h = inverse_mod(S, g) + x
+    h0_list = h.list()[::2]
+    h1_list = h.list()[1::2]
+    h0 = sum([sqrt(h0_list[i]) * x^i for i in range(len(h0_list))])
+    h1 = sum([sqrt(h1_list[i]) * x^i for i in range(len(h1_list))])
+    v = (h0 + root_x * h1).mod(g)
+    return v
+
+def keyEquation(m, v, g):
+    F = GF(2^m, name='z')
+    P = PolynomialRing(F, 'x')
+    x = P.gen()
+    t = g.degree()
+    r0 = g
+    r1 = v
+    u0 = P(0)
+    u1 = P(1)
+    while r1.degree() >= t // 2:
+        q, r = r0.quo_rem(r1)
+        r0 = r1
+        r1 = r
+        u0 = (u0 - q * u1).mod(g)
+        u0, u1 = u1, u0
+    return r1, u1
+
+def errorPosition(m, error_polynomial, code_locators):
+    F = GF(2^m, name='z')
+    errors = [i for i in code_locators if error_polynomial(i) == 0]
+    error_positions = [code_locators.index(e) for e in errors]
+    return error_positions
+
+def bitFlip(error_positions, w):
+    for i in error_positions:
+        w[i] = (w[i] + 1) % 2
+    return w
+
+def pattersonDecoding(m, receivedword, goppa_polynomial, code_locators):
+    F = GF(2^m, name='z')
+    P = PolynomialRing(F, 'x')
+    x = P.gen()
+    S = syndrome(m, receivedword, goppa_polynomial, code_locators)
+    if S == 0:
+        return "Codeword"
+    h = inverse_mod(S, goppa_polynomial)
+    if h / h.list()[1] == x:
+        pos = code_locators.index(F(0))
+        receivedword[pos] = (receivedword[pos] + 1) % 2
+        return receivedword
+    root_x = sqrtX(m, goppa_polynomial)
+    v = sqrtP(m, S, goppa_polynomial, root_x)
+    a0, b0 = keyEquation(m, v, goppa_polynomial)
+    error_polynomial = a0^2 + x * b0^2
+    error_polynomial = error_polynomial / error_polynomial.list()[1]
+    error_positions = errorPosition(m, error_polynomial, code_locators)
+    decodedword = bitFlip(error_positions, receivedword[:])
+    return decodedword, S, h, v, a0, b0, error_polynomial, error_positions
+
+def scramblerMatrix(base, rows, cols):
+    V = base^cols
+    vectors = []
+    for _ in range(rows):
+        v = V.random_element()
+        while v in V.span(vectors):
+            v = V.random_element()
+        vectors.append(v)
+    return matrix(vectors)
+
+def permutationMatrix(size, base):
+    return Permutations(size).random_element().to_matrix().change_ring(base)
+
+def keyGeneration(m, t, n, g):
+    F = GF(2^m, name='z')
+    H, support = parityMatrixGCExt(F, n, g)
+    Hbase = parityMatrixGCBase(F, H)
+    G = generatorMatrixGCBase(m, t, n, Hbase)
+    S = scramblerMatrix(GF(2), m * t, m * t)
+    Pmat = permutationMatrix(n, GF(2))
+    disguisedmatrix = S * G * Pmat
+    return disguisedmatrix, S, Pmat, support, G, H, Hbase
+
+def encryption(word, disguisedmatrix, t, n):
+    errors = [1] * (t - 1) + [0] * (n - t + 1)
+    p = Permutations(errors)
+    error_vector = vector(GF(2), p.random_element())
+    pre_ciphertext = word * disguisedmatrix
+    ciphertext = pre_ciphertext + error_vector
+    return ciphertext, error_vector, pre_ciphertext
+
+def decryption(m, ciphertext, polynomial, code_locators, P, S, generator_matrix):
+    F = GF(2^m, name='z')
+    inverse_permutation = ciphertext * P.inverse()
+    patterson_result = pattersonDecoding(m, list(inverse_permutation), polynomial, code_locators)
+    if patterson_result == "Codeword":
+        return "There is no error in the received word."
+    decodedword, syndrome_val, inv_syndrome, v, a0, b0, epsilon, error_positions = patterson_result
+    plaintext = (S * generator_matrix).solve_left(vector(GF(2), decodedword))
+    return plaintext, inverse_permutation, syndrome_val, inv_syndrome, v, a0, b0, epsilon, error_positions, decodedword
+
+# Goppa Code Setup
+text1 = """
+To set up the Cryptosystem, we first need to select the following parameters:
+
+m: degree of the field extension of GF(2)
+t: number of error corrections required
+n: length of the code
+g: an irreducible Goppa polynomial of degree t.
+
+Please select these parameters below:
+"""
+pretty_print(text1, figsize=[60, 10])
+
+@interact
+def mcEliece1(m=slider(3, 8, 1, default=4, label='m='), t=slider(2, 32, 1, default=3, label='t=')):
+    pretty_print(f"!! Ensure 't' does not exceed {(2^m - 1) // m}.")
+    
+    F = GF(2^m, name='z')
+    z = F.gen()
+
+    P = PolynomialRing(F, 'x')
+    x = P.gen()
+
+
+    @interact
+    def mcEliece3(n=slider(m*t, 2^m, 1, default=2^m, label='n='), g=selector(list(goppaPolynomial(F, t)), label='g=')):
+        pretty_print("The Goppa Polynomial you have chosen is:", g)
+
+        # Key Generation
+        pretty_print("\n\nKEY GENERATION:")
+        disguisedmatrix, scramblermatrix, permutationmatrix, code_locators, generator_matrix, parity_ext, parity_base = keyGeneration(m, t, n, g)
+
+        pretty_print(f"\nCode Locators ({n} elements from {F}):")
+        pretty_print(code_locators)
+
+        pretty_print(f"\nParity Check matrix over F2m:")
+        pretty_print(LatexExpr(r"\sum_{i=1}^{n} c_i\frac{h}{(x - \alpha_i)}\mod g = 0"))
+        pretty_print("Matrix in two parts (due to length):")
+        pretty_print("="*100)
+        pretty_print(parity_ext[:, :8])
+        pretty_print(parity_ext[:, 8:])
+        pretty_print("="*100)
+
+        pretty_print(f"\nParity Check matrix over GF(2):")
+        pretty_print(parity_base)
+
+        pretty_print(f"\nGenerator Matrix (size: {n - m*t} x {n}):")
+        pretty_print(generator_matrix)
+
+        pretty_print(f"\nScrambler Matrix (S) (size: {(n - m*t)} x {(n - m*t)}):")
+        pretty_print(scramblermatrix)
+
+        pretty_print(f"\nPermutation Matrix (P) (size: {n} x {n}):")
+        pretty_print(permutationmatrix)
+
+        pretty_print("\nEncryption Matrix (G') = S * G * P:")
+        pretty_print(disguisedmatrix)
+
+        pretty_print("\n\nPublic Key: (t, G')\nPrivate Key: (S, P, g, Code locators)")
+
+        # Encryption
+        pretty_print("\n\nENCRYPTION:")
+        pretty_print(f"Enter a binary word of length {n - m*t} with spaces between bits:")
+
+        value_plaintext = " ".join(map(str, [randint(0, 1) for _ in range(n - m*t)]))
+
+        @interact
+        def mcEliece4(plaintext=input_box(default=value_plaintext, type=str, label='Message:', width=100)):
+            pretty_print("\nEncrypting message using G'...")
+            word = vector(GF(2), map(int, plaintext.split()))
+            ciphertext, error, pre_ciphertext = encryption(word, disguisedmatrix, t, n)
+            pretty_print("Result of G' * message:")
+            pretty_print(pre_ciphertext)
+            pretty_print("Random error added:")
+            pretty_print(error)
+            pretty_print("Encrypted message (ciphertext):")
+            pretty_print(ciphertext)
+
+            # Decryption
+            pretty_print("\n\nDECRYPTION:")
+            decryption_output = decryption(m, ciphertext, g, code_locators, permutationmatrix, scramblermatrix, generator_matrix, verbose=True)
+
+            recovered_plaintext = decryption_output[0]
+            inverse_permutation = decryption_output[1]
+            syndrome = decryption_output[2]
+            inv_syndrome = decryption_output[3]
+            v = decryption_output[4]
+            a0 = decryption_output[5]
+            b0 = decryption_output[6]
+            epsilon = decryption_output[7]
+            error_positions = decryption_output[8]
+            decodedword = decryption_output[9]
+
+            pretty_print("Ciphertext after applying inverse permutation:")
+            pretty_print(inverse_permutation)
+
+            pretty_print("\nPatterson Decoding Process:")
+            pretty_print("Syndrome:")
+            pretty_print(syndrome)
+
+            pretty_print("Inverse of syndrome modulo g:")
+            pretty_print(inv_syndrome)
+
+            pretty_print("v = sqrt(S^(-1) + x) mod g:")
+            pretty_print(v)
+
+            pretty_print("Solving Key Equation (EEA):")
+            pretty_print(f"A(x): {a0}")
+            pretty_print(f"B(x): {b0}")
+
+            pretty_print("Error locator polynomial (ε):")
+            pretty_print(epsilon)
+
+            pretty_print("Error positions in received word:")
+            pretty_print(error_positions)
+
+            pretty_print("Decoded codeword (after flipping bits):")
+            pretty_print(decodedword)
+
+            pretty_print("Recovering original message using G:")
+            pretty_print(recovered_plaintext)
+
+            pretty_print("Verification: Original == Recovered?")
+            pretty_print(word == recovered_plaintext)
